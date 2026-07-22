@@ -1,5 +1,5 @@
 -- @description MSB_Mini Item Properties
--- @version 1.0.1
+-- @version 1.0.4
 -- @author Minseok Bang
 -- @requires ReaImGui (ReaPack)
 
@@ -103,6 +103,16 @@ end
 local function get_guid(it)
   local _, g = reaper.GetSetMediaItemInfo_String(it, 'GUID', '', false)
   return g
+end
+
+-- Effective fade length: a real auto-crossfade (D_FADE*LEN_AUTO > 0) overrides
+-- the manual length, which is what Reaper's own Item Properties shows. When it's
+-- 0 or -1 there's no auto fade, so fall back to the manual value (a 0/-1 auto
+-- must NOT hide a manual fade). `prop` is 'D_FADEINLEN' or 'D_FADEOUTLEN'.
+local function effective_fade(item, prop)
+  local a = reaper.GetMediaItemInfo_Value(item, prop .. '_AUTO')
+  if a > 0 then return a end
+  return reaper.GetMediaItemInfo_Value(item, prop)
 end
 
 -- =====================
@@ -464,17 +474,17 @@ local function spinner_box(id, key, opts)
     if dclicked then
       opts.on_reset()
       edit_field = nil
-    elseif hov and (not active) then
+    elseif enter or deact_edit then      -- commit takes priority so Enter /
+      opts.on_typed(buf[key])            -- click-away always applies + defocuses
+      edit_field = nil
+    elseif deact_any then
+      edit_field = nil
+    elseif hov and (not active) then     -- scroll while hovering (not typing)
       local w = get_wheel()
       if w ~= 0.0 then
         consumed_wheel = true
         opts.on_wheel(w > 0 and 1 or -1)
       end
-    elseif enter or deact_edit then
-      opts.on_typed(buf[key])
-      edit_field = nil
-    elseif deact_any then
-      edit_field = nil
     end
   else
     buf[key] = opts.display
@@ -611,20 +621,26 @@ local function set_len_all(v)
   end_undo("Set item length")
 end
 
--- Fade length (fade-in or fade-out): same wheel/typed model, min 0.
+-- Fade length (fade-in or fade-out): same wheel/typed model, min 0. Editing
+-- converts an auto-crossfade to a manual fade (clears *_AUTO) so the value
+-- actually takes effect — mirroring what dragging the fade in Reaper does.
 local function shift_fade(prop, delta)
   if delta == 0 then return end
   begin_undo()
   for_each_selected_item(function(it)
-    local cur = reaper.GetMediaItemInfo_Value(it, prop)
+    local cur = effective_fade(it, prop)
     reaper.SetMediaItemInfo_Value(it, prop, math.max(cur + delta, 0.0))
+    reaper.SetMediaItemInfo_Value(it, prop .. '_AUTO', -1)
   end)
   end_undo("Set fade length")
 end
 local function set_fade_all(prop, v)
   v = math.max(v, 0.0)
   begin_undo()
-  for_each_selected_item(function(it) reaper.SetMediaItemInfo_Value(it, prop, v) end)
+  for_each_selected_item(function(it)
+    reaper.SetMediaItemInfo_Value(it, prop, v)
+    reaper.SetMediaItemInfo_Value(it, prop .. '_AUTO', -1)
+  end)
   end_undo("Set fade length")
 end
 
@@ -738,8 +754,8 @@ local function loop()
     local fout_shape = math.floor(reaper.GetMediaItemInfo_Value(item, 'C_FADEOUTSHAPE'))
 
     local item_len = reaper.GetMediaItemInfo_Value(item, 'D_LENGTH')
-    local fin_len  = reaper.GetMediaItemInfo_Value(item, 'D_FADEINLEN')
-    local fout_len = reaper.GetMediaItemInfo_Value(item, 'D_FADEOUTLEN')
+    local fin_len  = effective_fade(item, 'D_FADEINLEN')
+    local fout_len = effective_fade(item, 'D_FADEOUTLEN')
     local playrate = take and reaper.GetMediaItemTakeInfo_Value(take, 'D_PLAYRATE') or 1.0
 
     -- Refresh length baselines: record an item's length the first frame it
@@ -1011,4 +1027,3 @@ local function loop()
 end
 
 reaper.defer(loop)
-
